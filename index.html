@@ -152,6 +152,14 @@
     { id: 10, name: "כניסה לספרייה - בניין 19",      lat: 31.2740861, lon: 34.7848951, x: 754, y: 235 }
   ];
 
+  const startPoints = {
+    library: {
+      name: "כניסה לספרייה - בניין 19",
+      x: 754,
+      y: 235
+    }
+  };
+
   let calibrationMarkers = [];
   let userMarker = null;
   let accuracyCircle = null;
@@ -164,6 +172,55 @@
 
   function setGpsStatus(text) {
     document.getElementById("gpsStatus").innerHTML = text;
+  }
+
+  function imagePointToMapLatLng(x, y) {
+    return [imageHeight - y, x];
+  }
+
+  function placeUserAtImagePoint(x, y, popupText) {
+    const mapLatLng = imagePointToMapLatLng(x, y);
+
+    const personIcon = L.divIcon({
+      html: "👤",
+      className: "personIcon",
+      iconSize: [30, 30],
+      iconAnchor: [15, 15]
+    });
+
+    if (!userMarker) {
+      userMarker = L.marker(mapLatLng, { icon: personIcon }).addTo(map);
+    } else {
+      userMarker.setLatLng(mapLatLng);
+    }
+
+    userMarker.bindPopup(popupText).openPopup();
+    map.setView(mapLatLng, 1);
+  }
+
+  function initializeStartPointFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const start = params.get("start");
+
+    if (!start || !startPoints[start]) {
+      return;
+    }
+
+    const point = startPoints[start];
+
+    placeUserAtImagePoint(
+      point.x,
+      point.y,
+      "אתה כאן<br>" +
+      "מיקום נקבע באמצעות QR<br>" +
+      point.name
+    );
+
+    setGpsStatus(
+      "המיקום נקבע באמצעות QR:<br>" +
+      point.name + "<br>" +
+      "מכאן ניתן להמשיך עם GPS."
+    );
   }
 
   function searchPlace() {
@@ -348,21 +405,19 @@
   function updateUserMarker(positionData) {
     const point = gpsToImage(positionData.lat, positionData.lon);
 
-    const mapLat = imageHeight - point.y;
-    const mapLng = point.x;
-
-    const personIcon = L.divIcon({
-      html: "👤",
-      className: "personIcon",
-      iconSize: [30, 30],
-      iconAnchor: [15, 15]
-    });
+    const mapLatLng = imagePointToMapLatLng(point.x, point.y);
 
     if (!userMarker) {
-      userMarker = L.marker([mapLat, mapLng], { icon: personIcon })
-        .addTo(map);
+      const personIcon = L.divIcon({
+        html: "👤",
+        className: "personIcon",
+        iconSize: [30, 30],
+        iconAnchor: [15, 15]
+      });
+
+      userMarker = L.marker(mapLatLng, { icon: personIcon }).addTo(map);
     } else {
-      userMarker.setLatLng([mapLat, mapLng]);
+      userMarker.setLatLng(mapLatLng);
     }
 
     userMarker
@@ -378,13 +433,13 @@
       map.removeLayer(accuracyCircle);
     }
 
-    accuracyCircle = L.circle([mapLat, mapLng], {
-      radius: Math.max(positionData.accuracy * 3, 10),
+    accuracyCircle = L.circleMarker(mapLatLng, {
+      radius: Math.min(Math.max(positionData.accuracy, 10), 45),
       opacity: 0.35,
       fillOpacity: 0.12
     }).addTo(map);
 
-    map.setView([mapLat, mapLng], 1);
+    map.setView(mapLatLng, 1);
   }
 
   function handleGpsPosition(position) {
@@ -395,17 +450,17 @@
       time: Date.now()
     };
 
-    if (!isInsideHospital(sample.lat, sample.lon)) {
-      setGpsStatus("המיקום הנוכחי נראה מחוץ לשטח בית החולים. ממתין למדידה טובה יותר...");
-      return;
-    }
-
     if (sample.accuracy > MAX_ACCEPTED_ACCURACY) {
       setGpsStatus(
         "מאתר מיקום...<br>" +
         "הדיוק כרגע נמוך מדי: " + sample.accuracy + " מטר<br>" +
         "נסה לעמוד בשטח פתוח ולהמתין כמה שניות."
       );
+      return;
+    }
+
+    if (!isInsideHospital(sample.lat, sample.lon)) {
+      setGpsStatus("המיקום נראה מחוץ לשטח בית החולים. ממתין למדידה טובה יותר...");
       return;
     }
 
@@ -508,6 +563,8 @@
       calibrationMarkers.push(marker);
     });
   }
+
+  initializeStartPointFromUrl();
 </script>
 
 </body>
