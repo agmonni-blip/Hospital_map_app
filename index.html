@@ -155,6 +155,8 @@
   const startPoints = {
     library: {
       name: "כניסה לספרייה - בניין 19",
+      lat: 31.2740861,
+      lon: 34.7848951,
       x: 754,
       y: 235
     }
@@ -166,9 +168,15 @@
 
   let watchId = null;
   let gpsSamples = [];
+
+  let activeAnchor = null;
+  let anchorGpsReference = null;
+  let anchorCalibrationSamples = [];
+
   const MAX_SAMPLES = 8;
   const MIN_SAMPLES_TO_DISPLAY = 4;
   const MAX_ACCEPTED_ACCURACY = 35;
+  const MIN_ANCHOR_SAMPLES = 4;
 
   function setGpsStatus(text) {
     document.getElementById("gpsStatus").innerHTML = text;
@@ -206,21 +214,23 @@
       return;
     }
 
-    const point = startPoints[start];
+    activeAnchor = startPoints[start];
+    anchorGpsReference = null;
+    anchorCalibrationSamples = [];
 
     placeUserAtImagePoint(
-      point.x,
-      point.y,
-      "אתה כאן<br>" +
-      "מיקום נקבע באמצעות QR<br>" +
-      point.name
+      activeAnchor.x,
+      activeAnchor.y,
+      "אתה כאן<br>מיקום נקבע באמצעות QR<br>" + activeAnchor.name
     );
 
     setGpsStatus(
       "המיקום נקבע באמצעות QR:<br>" +
-      point.name + "<br>" +
-      "מכאן ניתן להמשיך עם GPS."
+      activeAnchor.name + "<br>" +
+      "נא להמתין כמה שניות לכיול GPS ביחס לעוגן."
     );
+
+    startGpsTracking();
   }
 
   function searchPlace() {
@@ -348,7 +358,7 @@
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
-  function gpsToImage(lat, lon) {
+  function gpsToImageRaw(lat, lon) {
     const base = affinePredict(lat, lon);
 
     let weightedDx = 0;
@@ -380,6 +390,24 @@
     };
   }
 
+  function gpsToImage(lat, lon) {
+    const rawCurrent = gpsToImageRaw(lat, lon);
+
+    if (!activeAnchor || !anchorGpsReference) {
+      return rawCurrent;
+    }
+
+    const rawAnchorReference = gpsToImageRaw(
+      anchorGpsReference.lat,
+      anchorGpsReference.lon
+    );
+
+    return {
+      x: activeAnchor.x + (rawCurrent.x - rawAnchorReference.x),
+      y: activeAnchor.y + (rawCurrent.y - rawAnchorReference.y)
+    };
+  }
+
   function getWeightedAveragePosition(samples) {
     let totalWeight = 0;
     let latSum = 0;
@@ -404,17 +432,16 @@
 
   function updateUserMarker(positionData) {
     const point = gpsToImage(positionData.lat, positionData.lon);
-
     const mapLatLng = imagePointToMapLatLng(point.x, point.y);
 
-    if (!userMarker) {
-      const personIcon = L.divIcon({
-        html: "👤",
-        className: "personIcon",
-        iconSize: [30, 30],
-        iconAnchor: [15, 15]
-      });
+    const personIcon = L.divIcon({
+      html: "👤",
+      className: "personIcon",
+      iconSize: [30, 30],
+      iconAnchor: [15, 15]
+    });
 
+    if (!userMarker) {
       userMarker = L.marker(mapLatLng, { icon: personIcon }).addTo(map);
     } else {
       userMarker.setLatLng(mapLatLng);
@@ -464,6 +491,34 @@
       return;
     }
 
+    if (activeAnchor && !anchorGpsReference) {
+      anchorCalibrationSamples.push(sample);
+
+      if (anchorCalibrationSamples.length > MAX_SAMPLES) {
+        anchorCalibrationSamples.shift();
+      }
+
+      setGpsStatus(
+        "מכייל מיקום ביחס לעוגן QR:<br>" +
+        activeAnchor.name + "<br>" +
+        "נאספו " + anchorCalibrationSamples.length + " מתוך " + MIN_ANCHOR_SAMPLES + " מדידות."
+      );
+
+      if (anchorCalibrationSamples.length < MIN_ANCHOR_SAMPLES) {
+        return;
+      }
+
+      anchorGpsReference = getWeightedAveragePosition(anchorCalibrationSamples);
+
+      setGpsStatus(
+        "עוגן QR כויל בהצלחה:<br>" +
+        activeAnchor.name + "<br>" +
+        "כעת המיקום יחושב ביחס לעוגן."
+      );
+
+      return;
+    }
+
     gpsSamples.push(sample);
 
     if (gpsSamples.length > MAX_SAMPLES) {
@@ -487,7 +542,7 @@
     setGpsStatus(
       "המיקום עודכן.<br>" +
       "דיוק משוקלל משוער: " + stablePosition.accuracy + " מטר<br>" +
-      "המערכת ממשיכה לשפר את המיקום."
+      (activeAnchor ? "המיקום מחושב ביחס לעוגן QR." : "המיקום מחושב לפי GPS.")
     );
   }
 
@@ -506,19 +561,8 @@
     alert(message);
   }
 
-  function findMe() {
-    if (!navigator.geolocation) {
-      alert("הדפדפן לא תומך בזיהוי מיקום.");
-      return;
-    }
-
+  function startGpsTracking() {
     gpsSamples = [];
-
-    setGpsStatus(
-      "מאתר מיקום...<br>" +
-      "נא להמתין כמה שניות בשטח פתוח.<br>" +
-      "המדידה הראשונה לעיתים אינה מדויקת."
-    );
 
     if (watchId !== null) {
       navigator.geolocation.clearWatch(watchId);
@@ -534,6 +578,21 @@
         maximumAge: 0
       }
     );
+  }
+
+  function findMe() {
+    if (!navigator.geolocation) {
+      alert("הדפדפן לא תומך בזיהוי מיקום.");
+      return;
+    }
+
+    setGpsStatus(
+      "מאתר מיקום...<br>" +
+      "נא להמתין כמה שניות בשטח פתוח.<br>" +
+      "המדידה הראשונה לעיתים אינה מדויקת."
+    );
+
+    startGpsTracking();
   }
 
   function toggleCalibrationPoints() {
