@@ -38,6 +38,13 @@
 
     button { padding: 7px; font-size: 15px; cursor: pointer; }
 
+    #gpsStatus {
+      margin-top: 8px;
+      font-size: 13px;
+      max-width: 270px;
+      line-height: 1.4;
+    }
+
     .personIcon {
       font-size: 30px;
       text-align: center;
@@ -71,6 +78,8 @@
 
   <button onclick="searchPlace()">חפש</button>
   <button onclick="toggleCalibrationPoints()">נקודות כיול</button>
+
+  <div id="gpsStatus"></div>
 </div>
 
 <div id="map"></div>
@@ -130,12 +139,6 @@
     markers[place.name] = marker;
   });
 
-  /*
-    נקודות כיול:
-    lat/lon = GPS
-    x/y = מיקום ה-X האדום על תמונת המפה
-    אם נראה סטייה קבועה באזור מסוים — נתקן רק את ה-x/y של נקודת הכיול הקרובה.
-  */
   const calibrationPoints = [
     { id: 1,  name: "פינה צפון-מזרחית",              lat: 31.2744858, lon: 34.7853431, x: 810, y: 112 },
     { id: 2,  name: "פינה צפון-מערבית",              lat: 31.2741357, lon: 34.7812648, x: 92,  y: 135 },
@@ -151,6 +154,17 @@
 
   let calibrationMarkers = [];
   let userMarker = null;
+  let accuracyCircle = null;
+
+  let watchId = null;
+  let gpsSamples = [];
+  const MAX_SAMPLES = 8;
+  const MIN_SAMPLES_TO_DISPLAY = 4;
+  const MAX_ACCEPTED_ACCURACY = 35;
+
+  function setGpsStatus(text) {
+    document.getElementById("gpsStatus").innerHTML = text;
+  }
 
   function searchPlace() {
     const search = document.getElementById("searchBox").value.trim();
@@ -284,7 +298,7 @@
     let weightedDy = 0;
     let totalWeight = 0;
 
-    calibrationPoints.forEach(p => {
+    for (const p of calibrationPoints) {
       const predicted = affinePredict(p.lat, p.lon);
 
       const residualX = p.x - predicted.x;
@@ -301,12 +315,140 @@
       weightedDx += residualX * weight;
       weightedDy += residualY * weight;
       totalWeight += weight;
-    });
+    }
 
     return {
       x: base.x + weightedDx / totalWeight,
       y: base.y + weightedDy / totalWeight
     };
+  }
+
+  function getWeightedAveragePosition(samples) {
+    let totalWeight = 0;
+    let latSum = 0;
+    let lonSum = 0;
+    let accuracySum = 0;
+
+    samples.forEach(sample => {
+      const weight = 1 / Math.max(sample.accuracy, 1);
+
+      latSum += sample.lat * weight;
+      lonSum += sample.lon * weight;
+      accuracySum += sample.accuracy * weight;
+      totalWeight += weight;
+    });
+
+    return {
+      lat: latSum / totalWeight,
+      lon: lonSum / totalWeight,
+      accuracy: Math.round(accuracySum / totalWeight)
+    };
+  }
+
+  function updateUserMarker(positionData) {
+    const point = gpsToImage(positionData.lat, positionData.lon);
+
+    const mapLat = imageHeight - point.y;
+    const mapLng = point.x;
+
+    const personIcon = L.divIcon({
+      html: "👤",
+      className: "personIcon",
+      iconSize: [30, 30],
+      iconAnchor: [15, 15]
+    });
+
+    if (!userMarker) {
+      userMarker = L.marker([mapLat, mapLng], { icon: personIcon })
+        .addTo(map);
+    } else {
+      userMarker.setLatLng([mapLat, mapLng]);
+    }
+
+    userMarker
+      .bindPopup(
+        "אתה כאן<br>" +
+        "דיוק GPS משוער: " + positionData.accuracy + " מטר<br>" +
+        "Lat: " + positionData.lat.toFixed(7) + "<br>" +
+        "Lon: " + positionData.lon.toFixed(7)
+      )
+      .openPopup();
+
+    if (accuracyCircle) {
+      map.removeLayer(accuracyCircle);
+    }
+
+    accuracyCircle = L.circle([mapLat, mapLng], {
+      radius: Math.max(positionData.accuracy * 3, 10),
+      opacity: 0.35,
+      fillOpacity: 0.12
+    }).addTo(map);
+
+    map.setView([mapLat, mapLng], 1);
+  }
+
+  function handleGpsPosition(position) {
+    const sample = {
+      lat: position.coords.latitude,
+      lon: position.coords.longitude,
+      accuracy: Math.round(position.coords.accuracy),
+      time: Date.now()
+    };
+
+    if (!isInsideHospital(sample.lat, sample.lon)) {
+      setGpsStatus("המיקום הנוכחי נראה מחוץ לשטח בית החולים. ממתין למדידה טובה יותר...");
+      return;
+    }
+
+    if (sample.accuracy > MAX_ACCEPTED_ACCURACY) {
+      setGpsStatus(
+        "מאתר מיקום...<br>" +
+        "הדיוק כרגע נמוך מדי: " + sample.accuracy + " מטר<br>" +
+        "נסה לעמוד בשטח פתוח ולהמתין כמה שניות."
+      );
+      return;
+    }
+
+    gpsSamples.push(sample);
+
+    if (gpsSamples.length > MAX_SAMPLES) {
+      gpsSamples.shift();
+    }
+
+    setGpsStatus(
+      "מאתר מיקום...<br>" +
+      "נאספו " + gpsSamples.length + " מתוך " + MIN_SAMPLES_TO_DISPLAY + " מדידות טובות.<br>" +
+      "דיוק אחרון: " + sample.accuracy + " מטר"
+    );
+
+    if (gpsSamples.length < MIN_SAMPLES_TO_DISPLAY) {
+      return;
+    }
+
+    const stablePosition = getWeightedAveragePosition(gpsSamples);
+
+    updateUserMarker(stablePosition);
+
+    setGpsStatus(
+      "המיקום עודכן.<br>" +
+      "דיוק משוקלל משוער: " + stablePosition.accuracy + " מטר<br>" +
+      "המערכת ממשיכה לשפר את המיקום."
+    );
+  }
+
+  function handleGpsError(error) {
+    let message = "לא הצלחתי לקבל מיקום.";
+
+    if (error.code === error.PERMISSION_DENIED) {
+      message = "לא אישרת הרשאת GPS.";
+    } else if (error.code === error.POSITION_UNAVAILABLE) {
+      message = "המיקום לא זמין כרגע.";
+    } else if (error.code === error.TIMEOUT) {
+      message = "לקח יותר מדי זמן לקבל מיקום.";
+    }
+
+    setGpsStatus(message);
+    alert(message);
   }
 
   function findMe() {
@@ -315,51 +457,25 @@
       return;
     }
 
-    navigator.geolocation.getCurrentPosition(
-      function(position) {
-        const gpsLat = position.coords.latitude;
-        const gpsLon = position.coords.longitude;
-        const accuracy = Math.round(position.coords.accuracy);
+    gpsSamples = [];
 
-        if (!isInsideHospital(gpsLat, gpsLon)) {
-          alert("אינך בשטח בית החולים.");
-          return;
-        }
+    setGpsStatus(
+      "מאתר מיקום...<br>" +
+      "נא להמתין כמה שניות בשטח פתוח.<br>" +
+      "המדידה הראשונה לעיתים אינה מדויקת."
+    );
 
-        const point = gpsToImage(gpsLat, gpsLon);
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
 
-        const mapLat = imageHeight - point.y;
-        const mapLng = point.x;
-
-        const personIcon = L.divIcon({
-          html: "👤",
-          className: "personIcon",
-          iconSize: [30, 30],
-          iconAnchor: [15, 15]
-        });
-
-        if (userMarker) {
-          map.removeLayer(userMarker);
-        }
-
-        userMarker = L.marker([mapLat, mapLng], { icon: personIcon })
-          .addTo(map)
-          .bindPopup(
-            "אתה כאן<br>" +
-            "דיוק GPS משוער: " + accuracy + " מטר<br>" +
-            "Lat: " + gpsLat.toFixed(7) + "<br>" +
-            "Lon: " + gpsLon.toFixed(7)
-          )
-          .openPopup();
-
-        map.setView([mapLat, mapLng], 1);
-      },
-      function(error) {
-        alert("לא הצלחתי לקבל מיקום. ייתכן שלא אישרת הרשאת GPS.");
-      },
+    watchId = navigator.geolocation.watchPosition(
+      handleGpsPosition,
+      handleGpsError,
       {
         enableHighAccuracy: true,
-        timeout: 10000,
+        timeout: 20000,
         maximumAge: 0
       }
     );
@@ -395,4 +511,4 @@
 </script>
 
 </body>
-</html>21:30 ‏19/‏06/‏2026
+</html>
