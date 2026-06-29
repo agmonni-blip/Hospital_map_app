@@ -57,6 +57,28 @@
       font-weight: bold;
       text-align: center;
     }
+
+    .nodeIcon {
+      background: #007bff;
+      color: white;
+      border-radius: 50%;
+      width: 24px;
+      height: 24px;
+      text-align: center;
+      line-height: 24px;
+      font-weight: bold;
+      border: 2px solid white;
+    }
+
+    #nodeOutput {
+      display: none;
+      width: 260px;
+      height: 120px;
+      margin-top: 8px;
+      font-size: 12px;
+      direction: ltr;
+    }
+
   </style>
 </head>
 
@@ -78,6 +100,11 @@
 
   <button onclick="searchPlace()">חפש</button>
   <button onclick="toggleCalibrationPoints()">נקודות כיול</button>
+  <button onclick="toggleNodeEditor()">מצב צמתים</button>
+  <button onclick="exportNodes()">ייצא צמתים</button>
+  <button onclick="togglePaths()">הצג שבילים</button>
+  <button id="pathSnapButton" onclick="togglePathSnapping()">הצמדה פעילה</button>
+  <textarea id="nodeOutput" readonly></textarea>
 
   <div id="gpsStatus"></div>
 </div>
@@ -431,8 +458,20 @@
   }
 
   function updateUserMarker(positionData) {
-    const point = gpsToImage(positionData.lat, positionData.lon);
-    const mapLatLng = imagePointToMapLatLng(point.x, point.y);
+    const rawPoint = gpsToImage(positionData.lat, positionData.lon);
+
+    const snapResult =
+      (typeof snapToNearestPath === "function")
+        ? snapToNearestPath(rawPoint)
+        : {
+            point: rawPoint,
+            snapped: false,
+            distance: null,
+            statusText: "הצמדה לשבילים עדיין לא נטענה."
+          };
+
+    const displayPoint = snapResult.point;
+    const mapLatLng = imagePointToMapLatLng(displayPoint.x, displayPoint.y);
 
     const personIcon = L.divIcon({
       html: "👤",
@@ -447,9 +486,15 @@
       userMarker.setLatLng(mapLatLng);
     }
 
+    const snapPopupText = snapResult.snapped
+      ? "הצמדה לשביל: פעילה<br>" +
+        "סטייה שתוקנה: " + Math.round(snapResult.distance) + " פיקסלים<br>"
+      : "הצמדה לשביל: לא בוצעה<br>";
+
     userMarker
       .bindPopup(
         "אתה כאן<br>" +
+        snapPopupText +
         "דיוק GPS משוער: " + positionData.accuracy + " מטר<br>" +
         "Lat: " + positionData.lat.toFixed(7) + "<br>" +
         "Lon: " + positionData.lon.toFixed(7)
@@ -467,6 +512,7 @@
     }).addTo(map);
 
     map.setView(mapLatLng, 1);
+    return snapResult;
   }
 
   function handleGpsPosition(position) {
@@ -537,12 +583,13 @@
 
     const stablePosition = getWeightedAveragePosition(gpsSamples);
 
-    updateUserMarker(stablePosition);
+    const snapResult = updateUserMarker(stablePosition);
 
     setGpsStatus(
       "המיקום עודכן.<br>" +
       "דיוק משוקלל משוער: " + stablePosition.accuracy + " מטר<br>" +
-      (activeAnchor ? "המיקום מחושב ביחס לעוגן QR." : "המיקום מחושב לפי GPS.")
+      (activeAnchor ? "המיקום מחושב ביחס לעוגן QR.<br>" : "המיקום מחושב לפי GPS.<br>") +
+      (snapResult && snapResult.statusText ? snapResult.statusText : "")
     );
   }
 
@@ -624,6 +671,908 @@
   }
 
   initializeStartPointFromUrl();
+</script>
+
+<script>
+  /*
+    עורך צמתים זמני:
+    - מצב צמתים: לחיצה על המפה מוסיפה צומת.
+    - ייצא צמתים: מעתיק את רשימת הצמתים כ-JavaScript.
+    - הכל נמצא בתוך index.html כדי שלא נצטרך קובץ node-editor.js נפרד.
+  */
+
+  let nodeEditorEnabled = false;
+  let pathNodes = [];
+  let nodeMarkers = [];
+
+  function toggleNodeEditor() {
+    nodeEditorEnabled = !nodeEditorEnabled;
+
+    if (nodeEditorEnabled) {
+      setGpsStatus("מצב צמתים פעיל:<br>לחץ על המפה כדי להוסיף צומת.");
+    } else {
+      setGpsStatus("מצב צמתים כבוי.");
+    }
+  }
+
+  map.on("click", function(e) {
+    if (!nodeEditorEnabled) return;
+
+    const x = Math.round(e.latlng.lng);
+    const y = Math.round(imageHeight - e.latlng.lat);
+
+    const defaultName = "צומת " + (pathNodes.length + 1);
+    const name = prompt("שם הצומת:", defaultName);
+
+    const node = {
+      id: pathNodes.length + 1,
+      name: name || defaultName,
+      x: x,
+      y: y
+    };
+
+    pathNodes.push(node);
+    addNodeMarker(node);
+    updateNodeOutput();
+
+    setGpsStatus(
+      "נוסף צומת " + node.id + ":<br>" +
+      node.name + "<br>" +
+      "x: " + node.x + ", y: " + node.y
+    );
+  });
+
+  function addNodeMarker(node) {
+    const icon = L.divIcon({
+      html: String(node.id),
+      className: "nodeIcon",
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
+    });
+
+    const marker = L.marker([imageHeight - node.y, node.x], { icon })
+      .addTo(map)
+      .bindPopup(
+        "<b>צומת " + node.id + "</b><br>" +
+        node.name + "<br>" +
+        "x: " + node.x + "<br>" +
+        "y: " + node.y + "<br><br>" +
+        "לחץ על 'ייצא צמתים' כדי להעתיק את הרשימה."
+      );
+
+    nodeMarkers.push(marker);
+  }
+
+  function updateNodeOutput() {
+    const output = document.getElementById("nodeOutput");
+    output.style.display = "block";
+    output.value =
+      "const pathNodes = " +
+      JSON.stringify(pathNodes, null, 2) +
+      ";";
+  }
+
+  function exportNodes() {
+    updateNodeOutput();
+
+    const output = document.getElementById("nodeOutput");
+    output.focus();
+    output.select();
+
+    try {
+      document.execCommand("copy");
+      alert("רשימת הצמתים הועתקה.");
+    } catch (e) {
+      alert("לא הצלחתי להעתיק אוטומטית. אפשר להעתיק ידנית מהתיבה.");
+    }
+  }
+
+  /*
+    שכבת שבילים זמנית:
+    - מציגה את הצמתים שסומנו ואת החיבורים ביניהם.
+    - עדיין לא מצמידה את מיקום המשתמש לשביל.
+    - המטרה כרגע היא בדיקה חזותית של מפת השבילים.
+  */
+
+  const savedPathNodes = [
+  {
+    "id": 1,
+    "name": "צומת 1",
+    "x": 552,
+    "y": 553
+  },
+  {
+    "id": 2,
+    "name": "צומת 2",
+    "x": 552,
+    "y": 511
+  },
+  {
+    "id": 3,
+    "name": "צומת 3",
+    "x": 519,
+    "y": 510
+  },
+  {
+    "id": 4,
+    "name": "צומת 4",
+    "x": 639,
+    "y": 510
+  },
+  {
+    "id": 5,
+    "name": "צומת 5",
+    "x": 640,
+    "y": 520
+  },
+  {
+    "id": 6,
+    "name": "צומת 6",
+    "x": 690,
+    "y": 511
+  },
+  {
+    "id": 7,
+    "name": "צומת 7",
+    "x": 689,
+    "y": 438
+  },
+  {
+    "id": 8,
+    "name": "צומת 8",
+    "x": 706,
+    "y": 511
+  },
+  {
+    "id": 9,
+    "name": "צומת 9",
+    "x": 707,
+    "y": 609
+  },
+  {
+    "id": 10,
+    "name": "צומת 10",
+    "x": 739,
+    "y": 511
+  },
+  {
+    "id": 11,
+    "name": "צומת 11",
+    "x": 769,
+    "y": 609
+  },
+  {
+    "id": 12,
+    "name": "צומת 12",
+    "x": 767,
+    "y": 575
+  },
+  {
+    "id": 13,
+    "name": "צומת 13",
+    "x": 815,
+    "y": 609
+  },
+  {
+    "id": 14,
+    "name": "צומת 14",
+    "x": 552,
+    "y": 454
+  },
+  {
+    "id": 15,
+    "name": "צומת 15",
+    "x": 577,
+    "y": 454
+  },
+  {
+    "id": 16,
+    "name": "צומת 16",
+    "x": 559,
+    "y": 431
+  },
+  {
+    "id": 17,
+    "name": "צומת 17",
+    "x": 577,
+    "y": 437
+  },
+  {
+    "id": 18,
+    "name": "צומת 18",
+    "x": 500,
+    "y": 454
+  },
+  {
+    "id": 19,
+    "name": "צומת 19",
+    "x": 499,
+    "y": 357
+  },
+  {
+    "id": 20,
+    "name": "צומת 20",
+    "x": 510,
+    "y": 357
+  },
+  {
+    "id": 21,
+    "name": "צומת 21",
+    "x": 510,
+    "y": 325
+  },
+  {
+    "id": 22,
+    "name": "צומת 22",
+    "x": 560,
+    "y": 357
+  },
+  {
+    "id": 23,
+    "name": "צומת 23",
+    "x": 608,
+    "y": 357
+  },
+  {
+    "id": 24,
+    "name": "צומת 24",
+    "x": 608,
+    "y": 336
+  },
+  {
+    "id": 25,
+    "name": "צומת 25",
+    "x": 664,
+    "y": 360
+  },
+  {
+    "id": 26,
+    "name": "צומת 26",
+    "x": 664,
+    "y": 338
+  },
+  {
+    "id": 27,
+    "name": "צומת 27",
+    "x": 815,
+    "y": 437
+  },
+  {
+    "id": 28,
+    "name": "צומת 28",
+    "x": 720,
+    "y": 336
+  },
+  {
+    "id": 29,
+    "name": "צומת 29",
+    "x": 673,
+    "y": 315
+  },
+  {
+    "id": 30,
+    "name": "צומת 30",
+    "x": 693,
+    "y": 315
+  },
+  {
+    "id": 31,
+    "name": "צומת 31",
+    "x": 775,
+    "y": 315
+  },
+  {
+    "id": 32,
+    "name": "צומת 32",
+    "x": 762,
+    "y": 261
+  },
+  {
+    "id": 33,
+    "name": "צומת 33",
+    "x": 813,
+    "y": 314
+  },
+  {
+    "id": 34,
+    "name": "צומת 34",
+    "x": 814,
+    "y": 341
+  },
+  {
+    "id": 35,
+    "name": "צומת 35",
+    "x": 791,
+    "y": 343
+  },
+  {
+    "id": 36,
+    "name": "צומת 36",
+    "x": 791,
+    "y": 403
+  },
+  {
+    "id": 37,
+    "name": "צומת 37",
+    "x": 816,
+    "y": 403
+  },
+  {
+    "id": 38,
+    "name": "צומת 38",
+    "x": 387,
+    "y": 453
+  },
+  {
+    "id": 39,
+    "name": "צומת 39",
+    "x": 388,
+    "y": 467
+  },
+  {
+    "id": 40,
+    "name": "צומת 40",
+    "x": 378,
+    "y": 466
+  },
+  {
+    "id": 41,
+    "name": "צומת 41",
+    "x": 380,
+    "y": 482
+  },
+  {
+    "id": 42,
+    "name": "צומת 42",
+    "x": 275,
+    "y": 465
+  },
+  {
+    "id": 43,
+    "name": "צומת 43",
+    "x": 274,
+    "y": 482
+  },
+  {
+    "id": 44,
+    "name": "צומת 44",
+    "x": 413,
+    "y": 356
+  },
+  {
+    "id": 45,
+    "name": "צומת 45",
+    "x": 413,
+    "y": 332
+  },
+  {
+    "id": 46,
+    "name": "צומת 46",
+    "x": 312,
+    "y": 358
+  },
+  {
+    "id": 47,
+    "name": "צומת 47",
+    "x": 312,
+    "y": 343
+  },
+  {
+    "id": 48,
+    "name": "צומת 48",
+    "x": 277,
+    "y": 356
+  },
+  {
+    "id": 49,
+    "name": "צומת 49",
+    "x": 278,
+    "y": 232
+  },
+  {
+    "id": 50,
+    "name": "צומת 50",
+    "x": 286,
+    "y": 218
+  },
+  {
+    "id": 51,
+    "name": "צומת 51",
+    "x": 286,
+    "y": 199
+  },
+  {
+    "id": 52,
+    "name": "צומת 52",
+    "x": 266,
+    "y": 360
+  },
+  {
+    "id": 53,
+    "name": "צומת 53",
+    "x": 242,
+    "y": 336
+  },
+  {
+    "id": 54,
+    "name": "צומת 54",
+    "x": 238,
+    "y": 390
+  },
+  {
+    "id": 55,
+    "name": "צומת 55",
+    "x": 387,
+    "y": 357
+  },
+  {
+    "id": 56,
+    "name": "צומת 56",
+    "x": 706,
+    "y": 629
+  },
+  {
+    "id": 57,
+    "name": "צומת 57",
+    "x": 241,
+    "y": 465
+  }
+];
+
+  const pathEdges = [
+  [
+    1,
+    2
+  ],
+  [
+    2,
+    3
+  ],
+  [
+    2,
+    14
+  ],
+  [
+    2,
+    4
+  ],
+  [
+    4,
+    5
+  ],
+  [
+    4,
+    6
+  ],
+  [
+    14,
+    15
+  ],
+  [
+    14,
+    16
+  ],
+  [
+    14,
+    17
+  ],
+  [
+    14,
+    18
+  ],
+  [
+    6,
+    8
+  ],
+  [
+    6,
+    7
+  ],
+  [
+    15,
+    17
+  ],
+  [
+    16,
+    22
+  ],
+  [
+    17,
+    7
+  ],
+  [
+    18,
+    19
+  ],
+  [
+    18,
+    38
+  ],
+  [
+    8,
+    9
+  ],
+  [
+    8,
+    10
+  ],
+  [
+    7,
+    27
+  ],
+  [
+    22,
+    20
+  ],
+  [
+    22,
+    23
+  ],
+  [
+    19,
+    20
+  ],
+  [
+    19,
+    44
+  ],
+  [
+    38,
+    39
+  ],
+  [
+    38,
+    55
+  ],
+  [
+    9,
+    56
+  ],
+  [
+    9,
+    11
+  ],
+  [
+    23,
+    24
+  ],
+  [
+    44,
+    45
+  ],
+  [
+    44,
+    55
+  ],
+  [
+    39,
+    40
+  ],
+  [
+    55,
+    46
+  ],
+  [
+    11,
+    12
+  ],
+  [
+    11,
+    13
+  ],
+  [
+    24,
+    26
+  ],
+  [
+    46,
+    47
+  ],
+  [
+    46,
+    48
+  ],
+  [
+    13,
+    27
+  ],
+  [
+    27,
+    37
+  ],
+  [
+    26,
+    28
+  ],
+  [
+    26,
+    29
+  ],
+  [
+    26,
+    30
+  ],
+  [
+    48,
+    52
+  ],
+  [
+    48,
+    49
+  ],
+  [
+    37,
+    36
+  ],
+  [
+    28,
+    35
+  ],
+  [
+    28,
+    30
+  ],
+  [
+    29,
+    30
+  ],
+  [
+    29,
+    28
+  ],
+  [
+    30,
+    31
+  ],
+  [
+    52,
+    53
+  ],
+  [
+    52,
+    54
+  ],
+  [
+    49,
+    50
+  ],
+  [
+    36,
+    35
+  ],
+  [
+    35,
+    34
+  ],
+  [
+    35,
+    33
+  ],
+  [
+    35,
+    31
+  ],
+  [
+    40,
+    41
+  ],
+  [
+    40,
+    42
+  ],
+  [
+    31,
+    32
+  ],
+  [
+    54,
+    57
+  ],
+  [
+    50,
+    51
+  ],
+  [
+    34,
+    37
+  ],
+  [
+    34,
+    33
+  ],
+  [
+    31,
+    33
+  ],
+  [
+    31,
+    34
+  ],
+  [
+    42,
+    43
+  ],
+  [
+    42,
+    57
+  ],
+  [
+    20,
+    21
+  ],
+  [
+    23,
+    25
+  ],
+  [
+    25,
+    26
+  ]
+];
+
+  let pathLayerItems = [];
+
+  let pathSnappingEnabled = true;
+  const MAX_SNAP_DISTANCE_PX = 60;
+
+  function getSavedPathNode(id) {
+    return savedPathNodes.find(node => node.id === id);
+  }
+
+  function togglePathSnapping() {
+    pathSnappingEnabled = !pathSnappingEnabled;
+
+    const button = document.getElementById("pathSnapButton");
+    if (button) {
+      button.textContent = pathSnappingEnabled ? "הצמדה פעילה" : "הצמדה כבויה";
+    }
+
+    setGpsStatus(
+      pathSnappingEnabled
+        ? "הצמדה לשבילים פעילה:<br>הסמן יוצג על השביל הקרוב כאשר הוא מספיק קרוב אליו."
+        : "הצמדה לשבילים כבויה:<br>הסמן יוצג לפי חישוב ה-GPS בלבד."
+    );
+  }
+
+  function closestPointOnSegment(point, a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lengthSquared = dx * dx + dy * dy;
+
+    if (lengthSquared === 0) {
+      return { x: a.x, y: a.y, t: 0 };
+    }
+
+    let t =
+      ((point.x - a.x) * dx + (point.y - a.y) * dy) /
+      lengthSquared;
+
+    t = Math.max(0, Math.min(1, t));
+
+    return {
+      x: a.x + t * dx,
+      y: a.y + t * dy,
+      t: t
+    };
+  }
+
+  function snapToNearestPath(point) {
+    if (!pathSnappingEnabled) {
+      return {
+        point: point,
+        snapped: false,
+        distance: null,
+        statusText: "הצמדה לשבילים כבויה."
+      };
+    }
+
+    let best = null;
+
+    pathEdges.forEach(edge => {
+      const a = getSavedPathNode(edge[0]);
+      const b = getSavedPathNode(edge[1]);
+
+      if (!a || !b) return;
+
+      const candidate = closestPointOnSegment(point, a, b);
+      const distance = Math.hypot(point.x - candidate.x, point.y - candidate.y);
+
+      if (!best || distance < best.distance) {
+        best = {
+          point: { x: candidate.x, y: candidate.y },
+          distance: distance,
+          edge: edge
+        };
+      }
+    });
+
+    if (!best) {
+      return {
+        point: point,
+        snapped: false,
+        distance: null,
+        statusText: "לא נמצאה רשת שבילים להצמדה."
+      };
+    }
+
+    if (best.distance > MAX_SNAP_DISTANCE_PX) {
+      return {
+        point: point,
+        snapped: false,
+        distance: best.distance,
+        edge: best.edge,
+        statusText:
+          "הסמן לא הוצמד לשביל:<br>הנקודה רחוקה מדי מהשביל הקרוב ביותר."
+      };
+    }
+
+    return {
+      point: best.point,
+      snapped: true,
+      distance: best.distance,
+      edge: best.edge,
+      statusText:
+        "הסמן הוצמד לשביל הקרוב ביותר.<br>" +
+        "סטייה שתוקנה: " + Math.round(best.distance) + " פיקסלים."
+    };
+  }
+
+  function togglePaths() {
+    if (pathLayerItems.length > 0) {
+      clearPaths();
+      setGpsStatus("שכבת השבילים הוסתרה.");
+      return;
+    }
+
+    drawPaths();
+    setGpsStatus("שכבת השבילים מוצגת:<br>בדוק שהקווים יושבים על השבילים במפה.");
+  }
+
+  function drawPaths() {
+    pathEdges.forEach(edge => {
+      const a = getSavedPathNode(edge[0]);
+      const b = getSavedPathNode(edge[1]);
+
+      if (!a || !b) return;
+
+      const line = L.polyline([
+        imagePointToMapLatLng(a.x, a.y),
+        imagePointToMapLatLng(b.x, b.y)
+      ], {
+        weight: 5,
+        opacity: 0.75
+      }).addTo(map);
+
+      line.bindPopup(
+        "שביל:<br>" +
+        a.name + " ↔ " + b.name
+      );
+
+      pathLayerItems.push(line);
+    });
+
+    savedPathNodes.forEach(node => {
+      const dot = L.circleMarker(imagePointToMapLatLng(node.x, node.y), {
+        radius: 5,
+        opacity: 0.9,
+        fillOpacity: 0.9
+      }).addTo(map);
+
+      dot.bindPopup(
+        "<b>" + node.name + "</b><br>" +
+        "x: " + node.x + "<br>" +
+        "y: " + node.y
+      );
+
+      pathLayerItems.push(dot);
+    });
+  }
+
+  function clearPaths() {
+    pathLayerItems.forEach(item => map.removeLayer(item));
+    pathLayerItems = [];
+  }
+
 </script>
 
 </body>
